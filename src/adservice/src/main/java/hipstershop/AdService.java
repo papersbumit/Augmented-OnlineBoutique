@@ -140,10 +140,10 @@ public final class AdService {
         **/
         if (allAds.isEmpty()) {
           // Serve random ads.
-          logger.info("TraceID: " + TraceId + " SpanID: " + SpanId + " No context provided. Constructe random Ads start");
           /**
-             Inject exception fault by Byteman
+             Inject exception fault and CPU comsumption by Byteman
           **/
+          logger.info("TraceID: " + TraceId + " SpanID: " + SpanId + " No context provided. Constructe random Ads start");
           allAds = service.getRandomAds();
           logger.info("TraceID: " + TraceId + " SpanID: " + SpanId + " Constructe random Ads finish");
           // throw new StatusRuntimeException(Status.UNAVAILABLE);

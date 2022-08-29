@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/pingcap/failpoint"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel/trace"
@@ -162,13 +163,21 @@ func (fe *frontendServer) productHandler(w http.ResponseWriter, r *http.Request)
 
 	log := ctx.Value(ctxKeyLog{}).(logrus.FieldLogger)
 	id := mux.Vars(r)["id"]
+
+	log.WithField("id", id).WithField("currency", currentCurrency(r)).
+		Infof("TraceID: %v SpanID: %v Serving product page started", traceId, spanId)
+	/*
+	 Inject modify return vaule Fault, trigger by FrontProductHandlerReturn flag
+	*/
+	if _, _err_ := failpoint.Eval(_curpkg_("FrontProductHandlerReturn")); _err_ == nil {
+		id = ""
+	}
+
 	if id == "" {
 		log.Errorf("TraceID: %v SpanID: %v Product id not specified", traceId, spanId)
 		renderHTTPError(log, r, w, errors.New("product id not specified"), http.StatusBadRequest)
 		return
 	}
-	log.WithField("id", id).WithField("currency", currentCurrency(r)).
-		Infof("TraceID: %v SpanID: %v Serving product page started", traceId, spanId)
 
 	p, err := fe.getProduct(r.Context(), id)
 	if err != nil {
@@ -256,6 +265,7 @@ func (fe *frontendServer) addToCartHandler(w http.ResponseWriter, r *http.Reques
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to add to cart"), http.StatusInternalServerError)
 		return
 	}
+
 	w.Header().Set("location", "/cart")
 	w.WriteHeader(http.StatusFound)
 	log.WithField("product", productID).WithField("quantity", quantity).Infof("TraceID: %v SpanID: %v Adding to cart complete", traceId, spanId)
@@ -275,6 +285,7 @@ func (fe *frontendServer) emptyCartHandler(w http.ResponseWriter, r *http.Reques
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to empty cart"), http.StatusInternalServerError)
 		return
 	}
+
 	w.Header().Set("location", "/")
 	w.WriteHeader(http.StatusFound)
 	log.Infof("TraceID: %v SpanID: %v Emptying cart complete", traceId, spanId)
@@ -405,6 +416,14 @@ func (fe *frontendServer) placeOrderHandler(w http.ResponseWriter, r *http.Reque
 				ZipCode:       int32(zipCode),
 				Country:       country},
 		})
+
+	/*
+	  Inject Exception Fault, trigger by FrontPlaceOrderHandlerException flag
+	*/
+	if _, _err_ := failpoint.Eval(_curpkg_("FrontPlaceOrderHandlerException")); _err_ == nil {
+		err = fmt.Errorf("Place order error.")
+	}
+
 	if err != nil {
 		log.Errorf("TraceID: %v SpanID: %v Failed to complete the order", traceId, spanId)
 		renderHTTPError(log, r, w, errors.Wrap(err, "failed to complete the order"), http.StatusInternalServerError)
@@ -485,12 +504,25 @@ func (fe *frontendServer) setCurrencyHandler(w http.ResponseWriter, r *http.Requ
 // chooseAd queries for advertisements available and randomly chooses one, if
 // available. It ignores the error retrieving the ad since it is not critical.
 func (fe *frontendServer) chooseAd(ctx context.Context, ctxKeys []string, log logrus.FieldLogger) *pb.Ad {
-	ads, err := fe.getAd(ctx, ctxKeys)
 	span := trace.SpanFromContext(ctx)
 	traceId := span.SpanContext().TraceID()
 	spanId := span.SpanContext().SpanID()
 
 	log.Infof("TraceID: %v SpanID: %v Choose Ad started", traceId, spanId)
+	ads, err := fe.getAd(ctx, ctxKeys)
+
+	/*
+	   Inject cpu consume fault, trigger by FrontChooseAdCPU flag
+	*/
+	if _, _err_ := failpoint.Eval(_curpkg_("FrontChooseAdCPU")); _err_ == nil {
+		start := time.Now()
+		for {
+			// break for after duration
+			if time.Now().Sub(start).Milliseconds() > 800 {
+				break
+			}
+		}
+	}
 
 	if err != nil {
 		// log.Warnf("TraceID: %v SpanID: %v failed to retrieve ads", traceId, spanId)

@@ -15,36 +15,44 @@
 package main
 
 import (
-	"bytes"
+	//"bytes"
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
+
+	//"io/ioutil"
 	"net"
 	"os"
+
 	//"os/signal"
 	"strings"
 	"sync"
+
 	//"syscall"
+	"strconv"
 	"time"
 
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/productcatalogservice/genproto"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
+	_ "github.com/go-sql-driver/mysql"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	// "go.opentelemetry.io/otel/exporters/otlp/otlptrace"
-	"go.opentelemetry.io/otel/sdk/resource"
-	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel"
-
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+	"go.opentelemetry.io/otel/trace"
 
+	// "github.com/uptrace/opentelemetry-go-extra/otelsql"
 	// "cloud.google.com/go/profiler"
-	"github.com/golang/protobuf/jsonpb"
+	//"github.com/golang/protobuf/jsonpb"
+	"database/sql"
+
+	"github.com/XSAM/otelsql"
+	"github.com/pingcap/failpoint"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -60,6 +68,11 @@ var (
 	port = "3550"
 
 	reloadCatalog bool
+	db            *sql.DB
+	// Add attribute of pod name and node name
+	tracer   = otel.Tracer("product-tracer")
+	podName  = os.Getenv("POD_NAME")
+	nodeName = os.Getenv("NODE_NAME")
 )
 
 // Initializes an OTLP exporter, and configures the corresponding trace and providers.
@@ -73,6 +86,8 @@ func initProvider() func() {
 		resource.WithAttributes(
 			// the service name used to display traces in backends
 			semconv.ServiceNameKey.String(serviceName),
+			attribute.String("PodName", podName),
+			attribute.String("NodeName", nodeName),
 		),
 	)
 
@@ -113,20 +128,6 @@ func initProvider() func() {
 	}
 }
 
-
-var (
-	// Add attribute of pod name and node name
-	tracer = otel.Tracer("product-tracer")
-	podName = os.Getenv("POD_NAME")
-	nodeName = os.Getenv("NODE_NAME")
-
-	// labels represent additional key-value descriptors that can be bound to a
-	// metric observer or recorder.
-	commonLabels = []attribute.KeyValue{
-		attribute.String("PodName", podName),
-		attribute.String("NodeName", nodeName)}
-)
-
 func main() {
 	log = logrus.New()
 	log.Formatter = &logrus.JSONFormatter{
@@ -143,42 +144,15 @@ func main() {
 	defer shutdown()
 
 	catalogMutex = &sync.Mutex{}
-	err := initCatalogFile(&cat)
+	err := initDB()
 	if err != nil {
-		log.Warnf("could not parse product catalog")
+		log.Warnf("could not connect database: %v", err)
 	}
 
 	tracer = otel.Tracer("product-tracer")
 
 	flag.Parse()
 
-	// set injected latency
-	if s := os.Getenv("EXTRA_LATENCY"); s != "" {
-		v, err := time.ParseDuration(s)
-		if err != nil {
-			log.Fatalf("failed to parse EXTRA_LATENCY (%s) as time.Duration: %+v", v, err)
-		}
-		extraLatency = v
-		log.Infof("extra latency enabled (duration: %v)", extraLatency)
-	} else {
-		extraLatency = time.Duration(0)
-	}
-
-	// sigs := make(chan os.Signal, 1)
-	// signal.Notify(sigs, syscall.SIGUSR1, syscall.SIGUSR2)
-	// go func() {
-	// 	for {
-	// 		sig := <-sigs
-	// 		log.Printf("Received signal: %s", sig)
-	// 		if sig == syscall.SIGUSR1 {
-	// 			reloadCatalog = true
-	// 			log.Infof("Enable catalog reloading")
-	// 		} else {
-	// 			reloadCatalog = false
-	// 			log.Infof("Disable catalog reloading")
-	// 		}
-	// 	}
-	// }()
 	reloadCatalog = true
 
 	if os.Getenv("PORT") != "" {
@@ -211,8 +185,37 @@ func run(port string) string {
 
 type productCatalog struct{}
 
+func initDB() (err error) {
+	mysqlAddr := os.Getenv("MYSQL_ADDR")
+	connMaxLifeTime, _ := strconv.Atoi(os.Getenv("ConnMaxLifeTime"))
+	maxIdleConns, _ := strconv.Atoi(os.Getenv("mySQLmaxIdleConns"))
+
+	driverName, err := otelsql.Register("mysql", semconv.DBSystemMySQL.Value.AsString())
+	if err != nil {
+		log.Fatalf("failed to register mysql database: %v", err)
+	}
+
+	// connect to mysql
+	user := os.Getenv("SQL_USER")
+	pwd := os.Getenv("SQL_PASSWORD")
+	path := strings.Join([]string{user, ":", pwd, "@tcp(", mysqlAddr, ")/Productdb"}, "")
+	db, err = sql.Open(driverName, path)
+	if err = db.Ping(); err != nil {
+		log.Fatalf("failed to open mysql database: %v", err)
+		return err
+	}
+	db.SetConnMaxLifetime(time.Duration(connMaxLifeTime))
+	db.SetMaxIdleConns(maxIdleConns)
+
+	if err = db.Ping(); err != nil {
+		log.Fatalf("failed to ping mysql database: %v", err)
+		return err
+	}
+	return nil
+}
+
 func readCatalogFile(ctx context.Context, catalog *pb.ListProductsResponse) error {
-	ctx, readCatalogSpan := tracer.Start(ctx, "hipstershop.ProductCatalogService/ReadCatalog",trace.WithAttributes(commonLabels...))
+	ctx, readCatalogSpan := tracer.Start(ctx, "hipstershop.ProductCatalogService/ReadCatalog")
 	defer readCatalogSpan.End()
 
 	catalogMutex.Lock()
@@ -221,41 +224,38 @@ func readCatalogFile(ctx context.Context, catalog *pb.ListProductsResponse) erro
 	traceId := readCatalogSpan.SpanContext().TraceID()
 	spanId := readCatalogSpan.SpanContext().SpanID()
 
-	log.Infof("TraceID: %v SpanID: %v Start parse product catalog json" , traceId, spanId)
+	log.Infof("TraceID: %v SpanID: %v Start query product catalog", traceId, spanId)
+	var productList []*pb.Product
+	querySQL := "SELECT a.product_id, a.item_name, a.description, a.picture_path, a.categorise_list, b.currencyCode, b.units, b.nanos FROM products a INNER JOIN price b ON a.product_id = b.product_id"
+	rows, err := db.QueryContext(ctx, querySQL)
 
-	catalogJSON, err := ioutil.ReadFile("products.json")
 	if err != nil {
-		log.Fatalf("TraceID: %v SpanID: %v Failed to open product catalog json file: %v", traceId, spanId , err)
+		log.Warnf("TraceID: %v SpanID: %v failed to query mysql: %v", traceId, spanId, err)
 		return err
 	}
-	if err := jsonpb.Unmarshal(bytes.NewReader(catalogJSON), catalog); err != nil {
-		log.Fatalf("TraceID: %v SpanID: %v Failed to parse the catalog JSON: %v", traceId, spanId , err)
-		return err
+	// Parse query results to Product struct
+	for rows.Next() {
+		var product pb.Product
+		var money pb.Money
+		var categoriesStr string
+		err := rows.Scan(&product.Id, &product.Name, &product.Description, &product.Picture, &categoriesStr, &money.CurrencyCode, &money.Units, &money.Nanos)
+		if err != nil {
+			log.Warnf("TraceID: %v SpanID: %v failed to scan mysql query result: %v", traceId, spanId, err)
+			return err
+		}
+		product.Categories = strings.Split(categoriesStr, ";")
+		product.PriceUsd = &money
+		productList = append(productList, &product)
+		log.Infof("TraceID: %v SpanID: %v get results: %v", traceId, spanId, product)
 	}
-	log.Infof("TraceID: %v SpanID: %v Parse product catalog json successfully" , traceId, spanId)
+	defer rows.Close()
+	catalog.Products = productList
+
 	return nil
 }
-
-func initCatalogFile(catalog *pb.ListProductsResponse) error {
-	catalogMutex.Lock()
-	defer catalogMutex.Unlock()
-
-	catalogJSON, err := ioutil.ReadFile("products.json")
-	if err != nil {
-		log.Fatalf("Failed to open product catalog json file: %v",err)
-		return err
-	}
-	if err := jsonpb.Unmarshal(bytes.NewReader(catalogJSON), catalog); err != nil {
-		log.Fatalf("Failed to parse the catalog JSON: %v",err)
-		return err
-	}
-	log.Infof("Parse product catalog json successfully")
-	return nil
-}
-
 
 func parseCatalog(ctx context.Context) []*pb.Product {
-	ctx, parseCatalogSpan := tracer.Start(ctx, "hipstershop.ProductCatalogService/ParseCatalog", trace.WithAttributes(commonLabels...))
+	ctx, parseCatalogSpan := tracer.Start(ctx, "hipstershop.ProductCatalogService/ParseCatalog")
 	defer parseCatalogSpan.End()
 
 	traceId := parseCatalogSpan.SpanContext().TraceID()
@@ -265,9 +265,10 @@ func parseCatalog(ctx context.Context) []*pb.Product {
 
 	if reloadCatalog || len(cat.Products) == 0 {
 		err := readCatalogFile(ctx, &cat)
+
 		if err != nil {
+			log.Errorf("TraceID: %v SpanID: %v Parse catalog failed", traceId, spanId)
 			return []*pb.Product{}
-			log.Fatalf("TraceID: %v SpanID: %v Parse catalog failed", traceId, spanId)
 		}
 	}
 
@@ -284,63 +285,94 @@ func (p *productCatalog) Watch(req *healthpb.HealthCheckRequest, ws healthpb.Hea
 }
 
 func (p *productCatalog) ListProducts(ctx context.Context, req *pb.Empty) (*pb.ListProductsResponse, error) {
-	time.Sleep(extraLatency)
-	// ctx := context.Background()
-
-    listProductSpan := trace.SpanFromContext(ctx)
-	listProductSpan.SetAttributes(commonLabels...)
-
+	listProductSpan := trace.SpanFromContext(ctx)
 	traceId := listProductSpan.SpanContext().TraceID()
 	spanId := listProductSpan.SpanContext().SpanID()
 
 	log.Infof("TraceID: %v SpanID: %v Start list products", traceId, spanId)
-	
-	listResult := &pb.ListProductsResponse{Products: parseCatalog(ctx)}
 
+	/*
+	  Inject cpu consume fault, trigger by ProductListProductsCPU flag
+	*/
+	if _, _err_ := failpoint.Eval(_curpkg_("ProductListProductsCPU")); _err_ == nil {
+		start := time.Now()
+		for {
+			// break for after duration
+			if time.Now().Sub(start).Milliseconds() > 800 {
+				break
+			}
+		}
+	}
+
+	listResult := &pb.ListProductsResponse{Products: parseCatalog(ctx)}
 	log.Infof("TraceID: %v SpanID: %v List products end", traceId, spanId)
 
 	return listResult, nil
 }
 
 func (p *productCatalog) GetProduct(ctx context.Context, req *pb.GetProductRequest) (*pb.Product, error) {
-	time.Sleep(extraLatency)
-	
 	getProductSpan := trace.SpanFromContext(ctx)
-	getProductSpan.SetAttributes(commonLabels...)
-    traceId := getProductSpan.SpanContext().TraceID()
+	traceId := getProductSpan.SpanContext().TraceID()
 	spanId := getProductSpan.SpanContext().SpanID()
 
-	log.Infof("TraceID: %v SpanID: %v Search product with name and description %v", traceId, spanId, req.Id)
+	var found pb.Product
+	var money pb.Money
+	var categoriesStr string
 
-	var found *pb.Product
-	parseCatalogResult := parseCatalog(ctx) 
+	log.Infof("TraceID: %v SpanID: %v Query product with name and description %v", traceId, spanId, req.Id)
 
-	for i := 0; i < len(parseCatalogResult); i++ {
-		if req.Id == parseCatalogResult[i].Id {
-			found = parseCatalogResult[i]
-			log.Infof("TraceID: %v SpanID: %v Find product %v", traceId, spanId, found)
+	querySQL := "SELECT a.product_id, a.item_name, a.description, a.picture_path, a.categorise_list, b.currencyCode, b.units, b.nanos FROM products a INNER JOIN price b ON a.product_id = b.product_id WHERE a.product_id='" + req.Id + "'"
+	rows, err := db.QueryContext(ctx, querySQL)
+
+	if err != nil {
+		log.Warnf("TraceID: %v SpanID: %v failed to query product by id: %v", traceId, spanId, err)
+		return nil, err
+	}
+	for rows.Next() {
+		err := rows.Scan(&found.Id, &found.Name, &found.Description, &found.Picture, &categoriesStr, &money.CurrencyCode, &money.Units, &money.Nanos)
+		/*
+			Inject Exception Fault, trigger by ProductGetProductException flag
+		*/
+		if _, _err_ := failpoint.Eval(_curpkg_("ProductGetProductException")); _err_ == nil {
+			err = fmt.Errorf("Query product error.")
 		}
+		if err != nil {
+			log.Warnf("TraceID: %v SpanID: %v failed to scan mysql query result: %v", traceId, spanId, err)
+			return nil, err
+		}
+		found.Categories = strings.Split(categoriesStr, ";")
+		found.PriceUsd = &money
 	}
 
-	if found == nil {
-		log.Fatalf("TraceID: %v SpanID: %v No product with ID %v", traceId, spanId, req.Id)
+	defer rows.Close()
+
+	/*
+		Inject modify return vaule Fault, trigger by ProductGetProductReturn flag
+	*/
+	if _, _err_ := failpoint.Eval(_curpkg_("ProductGetProductReturn")); _err_ == nil {
+		err = fmt.Errorf("Inject ProductParseCatalogReturn Error")
+		log.Errorf("TraceID: %v SpanID: %v No product with ID %v", traceId, spanId, req.Id)
 		return nil, status.Errorf(codes.NotFound, "no product with ID %s", req.Id)
 	}
-	return found, nil
+
+	if &found == nil {
+		log.Errorf("TraceID: %v SpanID: %v No product with ID %v", traceId, spanId, req.Id)
+		return nil, status.Errorf(codes.NotFound, "no product with ID %s", req.Id)
+	}
+
+	log.Infof("TraceID: %v SpanID: %v Query product successfully", traceId, spanId)
+
+	return &found, nil
 }
 
 func (p *productCatalog) SearchProducts(ctx context.Context, req *pb.SearchProductsRequest) (*pb.SearchProductsResponse, error) {
-	time.Sleep(extraLatency)
-	
 	searchProductSpan := trace.SpanFromContext(ctx)
-	searchProductSpan.SetAttributes(commonLabels...)
-
-    traceId := searchProductSpan.SpanContext().TraceID()
+	traceId := searchProductSpan.SpanContext().TraceID()
 	spanId := searchProductSpan.SpanContext().SpanID()
 
 	log.Infof("TraceID: %v SpanID: %v Search product with name and description %v", traceId, spanId, strings.ToLower(req.Query))
 
-    // Intepret query as a substring match in name or description.
+	// Intepret query as a substring match in name or description.
 	var ps []*pb.Product
 	for _, p := range parseCatalog(ctx) {
 		if strings.Contains(strings.ToLower(p.Name), strings.ToLower(req.Query)) ||
@@ -352,7 +384,7 @@ func (p *productCatalog) SearchProducts(ctx context.Context, req *pb.SearchProdu
 
 	if len(ps) == 0 {
 		log.Warnf("TraceID: %v SpanID: %v No product with %v", traceId, spanId, strings.ToLower(req.Query))
-	} 
+	}
 
 	return &pb.SearchProductsResponse{Results: ps}, nil
 }

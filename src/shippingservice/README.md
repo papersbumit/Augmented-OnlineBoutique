@@ -2,22 +2,37 @@
 
 The Shipping service provides price quote, tracking IDs, and the impression of order fulfillment & shipping processes.
 
-## Local
+failpoint-ctl enable
 
-Run the following command to restore dependencies to `vendor/` directory:
+docker build -t registry.cn-shenzhen.aliyuncs.com/trainticket/hipster-shippingservice:fault .
 
-    dep ensure --vendor-only
+docker push registry.cn-shenzhen.aliyuncs.com/trainticket/hipster-shippingservice:fault
 
-## Build
 
-From `src/shippingservice`, run:
-
+## Dynamic Inject fault
 ```
-docker build ./
+./goFaultInjector -f ShippingGetQuoteLatency -u http://127.0.0.1:12346 -d 60 -p "return(1000)" -c /src/fault.yaml
+./goFaultInjector -f ShippingShipOrderMemory -u http://127.0.0.1:12346 -d 60 -c /src/fault.yaml
+./goFaultInjector -f ShippingCreateQuoteFromFloatWrite -u http://127.0.0.1:12346 -d 30 -c /src/fault.yaml
+./goFaultInjector -f ShippingCreateQuoteFromCountRead -u http://127.0.0.1:12346 -d 30 -c /src/fault.yaml
+./goFaultInjector -f ShippingQuoteByCountFloatCPU -u http://127.0.0.1:12346 -d 60 -c /src/fault.yaml
 ```
 
-## Test
 
-```
-go test .
-```
+service: shipping
+faults: 
+  - fault: ShippingGetQuoteLatency
+    type: latency
+    location: main/ShippingGetQuoteLatency
+  - fault: ShippingShipOrderMemory
+    type: memory
+    location: main/ShippingShipOrderMemory
+  - fault: ShippingCreateQuoteFromCountRead
+    type: read
+    location: main/ShippingCreateQuoteFromCountRead
+  - fault: ShippingCreateQuoteFromFloatWrite
+    type: write
+    location: main/ShippingCreateQuoteFromFloatWrite
+  - fault: ShippingQuoteByCountFloatCPU
+    type: cpu
+    location: main/ShippingQuoteByCountFloatCPU

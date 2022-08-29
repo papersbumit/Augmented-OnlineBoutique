@@ -23,7 +23,7 @@ If you need to upgrade the version of gradle then run
 From `src/adservice/`, run:
 
 ```
-docker build -t registry.cn-shenzhen.aliyuncs.com/trainticket/hipster-adservice:opentelemetry1.0 .
-docker push  registry.cn-shenzhen.aliyuncs.com/trainticket/hipster-adservice:opentelemetry1.0
+docker build -t registry.cn-shenzhen.aliyuncs.com/trainticket/hipster-adservice:mysql .
+docker push  registry.cn-shenzhen.aliyuncs.com/trainticket/hipster-adservice:mysql
 ```
 

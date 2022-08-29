@@ -28,5 +28,5 @@ require (
 	github.com/google/martian v2.1.0
     github.com/googleapis/gax-go v1.0.3
 	google.golang.org/api v0.56.0
-	
+	github.com/pingcap/failpoint v0.0.0-20220309090818-0d9efe9d1572
 )

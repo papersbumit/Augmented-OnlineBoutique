@@ -6,8 +6,9 @@ plugins {
 }
 
 repositories {
-    mavenCentral()
+    maven { url 'https://maven.aliyun.com/repository/public/' }
     mavenLocal()
+    mavenCentral()
 }
 
 description = 'Ad Service'
@@ -18,6 +19,7 @@ def opentelemetryVersion = "1.5.0"
 def grpcVersion = "1.34.1"
 def jacksonVersion = "2.12.1"
 def protocVersion = "3.12.3"
+def mysqlVersion = "8.0.16"
 
 tasks.withType(JavaCompile) {
     sourceCompatibility = JavaVersion.VERSION_1_8
@@ -44,13 +46,14 @@ dependencies {
                 "io.grpc:grpc-stub:${grpcVersion}",
                 "io.grpc:grpc-netty:${grpcVersion}",
                 "io.grpc:grpc-services:${grpcVersion}",
-                "org.apache.logging.log4j:log4j-core:2.13.3",
-                "org.apache.logging.log4j:log4j-api:2.13.3",
+                "org.apache.logging.log4j:log4j-core:2.17.1",
+                "org.apache.logging.log4j:log4j-api:2.17.1",
                 "com.lmax:disruptor:3.4.2"
 
         runtimeOnly "com.fasterxml.jackson.core:jackson-core:${jacksonVersion}",
                 "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}",
-                "io.netty:netty-tcnative-boringssl-static:2.0.34.Final"
+                "io.netty:netty-tcnative-boringssl-static:2.0.34.Final",
+                "mysql:mysql-connector-java:${mysqlVersion}"
     }
 }
 

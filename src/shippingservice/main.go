@@ -16,12 +16,13 @@ package main
 
 import (
 	"fmt"
+	"math"
+	"math/rand"
 	"net"
 	"os"
 	"time"
-	"math"
-	"math/rand"
 
+	"github.com/pingcap/failpoint"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -31,16 +32,16 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+
 	// "go.opentelemetry.io/otel/exporters/otlp/otlptrace"
-	"go.opentelemetry.io/otel/sdk/resource"
-	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/trace"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
-
 
 	pb "github.com/GoogleCloudPlatform/microservices-demo/src/shippingservice/genproto"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -55,12 +56,24 @@ var log *logrus.Logger
 // seeded determines if the random number generator is ready.
 var seeded bool = false
 
-
 // Quote represents a currency value.
 type Quote struct {
 	Dollars uint32
 	Cents   uint32
 }
+
+var (
+	// Add attribute of pod name and node name
+	tracer   = otel.Tracer("shipping-tracer")
+	podName  = os.Getenv("POD_NAME")
+	nodeName = os.Getenv("NODE_NAME")
+
+	// labels represent additional key-value descriptors that can be bound to a
+	// metric observer or recorder.
+	// commonLabels = []attribute.KeyValue{
+	// 	attribute.String("PodName", podName),
+	// 	attribute.String("NodeName", nodeName)}
+)
 
 // Initializes an OTLP exporter, and configures the corresponding trace and providers.
 func initProvider() func() {
@@ -73,6 +86,8 @@ func initProvider() func() {
 		resource.WithAttributes(
 			// the service name used to display traces in backends
 			semconv.ServiceNameKey.String(serviceName),
+			attribute.String("PodName", podName),
+			attribute.String("NodeName", nodeName),
 		),
 	)
 
@@ -112,21 +127,6 @@ func initProvider() func() {
 		}
 	}
 }
-
-
-var (
-	// Add attribute of pod name and node name
-	tracer = otel.Tracer("shipping-tracer")
-	podName = os.Getenv("POD_NAME")
-	nodeName = os.Getenv("NODE_NAME")
-
-	// labels represent additional key-value descriptors that can be bound to a
-	// metric observer or recorder.
-	commonLabels = []attribute.KeyValue{
-		attribute.String("PodName", podName),
-		attribute.String("NodeName", nodeName)}
-)
-
 
 func main() {
 	log = logrus.New()
@@ -190,17 +190,25 @@ func (s *server) Watch(req *healthpb.HealthCheckRequest, ws healthpb.Health_Watc
 // GetQuote produces a shipping quote (cost) in USD.
 func (s *server) GetQuote(ctx context.Context, in *pb.GetQuoteRequest) (*pb.GetQuoteResponse, error) {
 	getQuoteSpan := trace.SpanFromContext(ctx)
-	getQuoteSpan.SetAttributes(commonLabels...)
-    traceId := getQuoteSpan.SpanContext().TraceID()
+	// getQuoteSpan.SetAttributes(commonLabels...)
+	traceId := getQuoteSpan.SpanContext().TraceID()
 	spanId := getQuoteSpan.SpanContext().SpanID()
 
-	log.Infof("TraceID: %v SpanID: %v [GetQuote] received request", traceId, spanId)
-	defer log.Infof("TraceID: %v SpanID: %v [GetQuote] completed request", traceId, spanId)
+	log.Infof("TraceID: %v SpanID: %v GetQuote received request", traceId, spanId)
+	defer log.Infof("TraceID: %v SpanID: %v GetQuote completed request", traceId, spanId)
 
 	// 1. Our quote system requires the total number of items to be shipped.
 	count := 0
 	for _, item := range in.Items {
 		count += int(item.Quantity)
+	}
+
+	/*
+		long query, latency
+	*/
+	if val, _err_ := failpoint.Eval(_curpkg_("ShippingGetQuoteLatency")); _err_ == nil {
+		// log.Info("Inject ProductReadCatalogLatency Success")
+		time.Sleep(time.Millisecond * time.Duration(val.(int)))
 	}
 
 	// 2. Generate a quote based on the total number of items to be shipped.
@@ -220,12 +228,12 @@ func (s *server) GetQuote(ctx context.Context, in *pb.GetQuoteRequest) (*pb.GetQ
 // It supplies a tracking ID for notional lookup of shipment delivery status.
 func (s *server) ShipOrder(ctx context.Context, in *pb.ShipOrderRequest) (*pb.ShipOrderResponse, error) {
 	shipOrderSpan := trace.SpanFromContext(ctx)
-	shipOrderSpan.SetAttributes(commonLabels...)
-    traceId := shipOrderSpan.SpanContext().TraceID()
+	// shipOrderSpan.SetAttributes(commonLabels...)
+	traceId := shipOrderSpan.SpanContext().TraceID()
 	spanId := shipOrderSpan.SpanContext().SpanID()
 
-	log.Infof("TraceID: %v SpanID: %v [ShipOrder] received request", traceId, spanId)
-	defer log.Infof("TraceID: %v SpanID: %v [ShipOrder] completed request", traceId, spanId)
+	log.Infof("TraceID: %v SpanID: %v ShipOrder received request", traceId, spanId)
+	defer log.Infof("TraceID: %v SpanID: %v ShipOrder completed request", traceId, spanId)
 
 	// 1. Create a Tracking ID
 	baseAddress := fmt.Sprintf("%s, %s, %s", in.Address.StreetAddress, in.Address.City, in.Address.State)
@@ -276,29 +284,30 @@ func (q Quote) String() string {
 
 // CreateQuoteFromCount takes a number of items and returns a Price struct.
 func CreateQuoteFromCount(ctx context.Context, count int) Quote {
-	ctx, createQuoteFromCountSpan := tracer.Start(ctx, "hipstershop.ShippingService/CreateQuoteFromCount", trace.WithAttributes(commonLabels...))
+	ctx, createQuoteFromCountSpan := tracer.Start(ctx, "hipstershop.ShippingService/CreateQuoteFromCount")
 	defer createQuoteFromCountSpan.End()
 
 	traceId := createQuoteFromCountSpan.SpanContext().TraceID()
 	spanId := createQuoteFromCountSpan.SpanContext().SpanID()
 
-	log.Infof("TraceID: %v SpanID: %v [CreateQuoteFromCount] received request", traceId, spanId)
-	defer log.Infof("TraceID: %v SpanID: %v [CreateQuoteFromCount] completed request", traceId, spanId)
+	log.Infof("TraceID: %v SpanID: %v CreateQuoteFromCount received request", traceId, spanId)
+	defer log.Infof("TraceID: %v SpanID: %v CreateQuoteFromCount completed request", traceId, spanId)
 	return CreateQuoteFromFloat(ctx, quoteByCountFloat(ctx, count))
 }
 
 // CreateQuoteFromFloat takes a price represented as a float and creates a Price struct.
 func CreateQuoteFromFloat(ctx context.Context, value float64) Quote {
-	ctx, createQuoteFromFloatSpan := tracer.Start(ctx, "hipstershop.ShippingService/CreateQuoteFromFloat", trace.WithAttributes(commonLabels...))
+	ctx, createQuoteFromFloatSpan := tracer.Start(ctx, "hipstershop.ShippingService/CreateQuoteFromFloat")
 	defer createQuoteFromFloatSpan.End()
 
 	traceId := createQuoteFromFloatSpan.SpanContext().TraceID()
 	spanId := createQuoteFromFloatSpan.SpanContext().SpanID()
 
-	log.Infof("TraceID: %v SpanID: %v [CreateQuoteFromFloat] received request", traceId, spanId)
-	defer log.Infof("TraceID: %v SpanID: %v [CreateQuoteFromFloat] completed request", traceId, spanId)
+	log.Infof("TraceID: %v SpanID: %v CreateQuoteFromFloat received request", traceId, spanId)
+	defer log.Infof("TraceID: %v SpanID: %v CreateQuoteFromFloat completed request", traceId, spanId)
 
 	units, fraction := math.Modf(value)
+
 	return Quote{
 		uint32(units),
 		uint32(math.Trunc(fraction * 100)),
@@ -307,18 +316,30 @@ func CreateQuoteFromFloat(ctx context.Context, value float64) Quote {
 
 // quoteByCountFloat takes a number of items and generates a price quote represented as a float.
 func quoteByCountFloat(ctx context.Context, count int) float64 {
-	ctx, quoteByCountFloatSpan := tracer.Start(ctx, "hipstershop.ShippingService/QuoteByCountFloat", trace.WithAttributes(commonLabels...))
+	ctx, quoteByCountFloatSpan := tracer.Start(ctx, "hipstershop.ShippingService/QuoteByCountFloat")
 	defer quoteByCountFloatSpan.End()
 
 	traceId := quoteByCountFloatSpan.SpanContext().TraceID()
 	spanId := quoteByCountFloatSpan.SpanContext().SpanID()
 
-	log.Infof("TraceID: %v SpanID: %v [QuoteByCountFloat] received request", traceId, spanId)
-	defer log.Infof("TraceID: %v SpanID: %v [QuoteByCountFloat] completed request", traceId, spanId)
+	log.Infof("TraceID: %v SpanID: %v QuoteByCountFloat received request", traceId, spanId)
+	defer log.Infof("TraceID: %v SpanID: %v QuoteByCountFloat completed request", traceId, spanId)
 	if count == 0 {
 		return 0
 	}
 	count64 := float64(count)
 	var p = 1 + (count64 * 0.2)
+	/*
+	  Inject cpu consume fault, trigger by ShippingQuoteByCountFloatCPU flag
+	*/
+	if _, _err_ := failpoint.Eval(_curpkg_("ShippingQuoteByCountFloatCPU")); _err_ == nil {
+		start := time.Now()
+		for {
+			// break for after duration
+			if time.Now().Sub(start).Milliseconds() > 800 {
+				break
+			}
+		}
+	}
 	return count64 + math.Pow(3, p)
 }

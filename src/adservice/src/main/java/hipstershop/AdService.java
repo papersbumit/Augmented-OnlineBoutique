@@ -27,6 +27,7 @@ import io.grpc.Contexts;
 import io.grpc.Grpc;
 import io.grpc.Metadata;
 import io.grpc.Server;
+import io.grpc.Status;
 import io.grpc.ServerBuilder;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
@@ -38,6 +39,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Random;
+import java.util.HashMap;
 import java.util.concurrent.TimeUnit;
 import java.net.InetSocketAddress;
 import org.apache.logging.log4j.Level;
@@ -48,11 +50,17 @@ import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanContext;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.extension.annotations.WithSpan;
+import java.sql.*;
+import java.lang.ClassNotFoundException;
 
 
 public final class AdService {
+  // Logger.getGlobal().setLevel(Level.ALL);
   private static final Logger logger = LogManager.getLogger(AdService.class);
-
+  // logger.setLevel(Level.ALL);
+  private static final String mysqlAddr = System.getenv("MYSQL_ADDR");
+  private static final String user = System.getenv("SQL_USER");
+  private static final String pwd = System.getenv("SQL_PASSWORD");
   private static final String podName = System.getenv("POD_NAME");
   private static final String nodeName = System.getenv("NODE_NAME");
 
@@ -106,10 +114,13 @@ public final class AdService {
      */
     @Override
     @WithSpan
-    public void getAds(AdRequest req, StreamObserver<AdResponse> responseObserver) {
+    public void getAds(AdRequest req, StreamObserver<AdResponse> responseObserver){
       AdService service = AdService.getInstance();
 
       Span span = span = Span.current();
+      span.updateName("hipstershop.AdServiceImpl/getAds");
+      span.setAttribute("PodName", podName);
+      span.setAttribute("NodeName", nodeName);
       SpanContext spancontext = span.getSpanContext();
       String TraceId = spancontext.getTraceId();
       String SpanId = spancontext.getSpanId();
@@ -117,38 +128,49 @@ public final class AdService {
       try {
         List<Ad> allAds = new ArrayList<>();
         logger.info("TraceID: " + TraceId + " SpanID: " + SpanId + " Received ad request (context_words=" + req.getContextKeysList() + ")");
-
         if (req.getContextKeysCount() > 0) {
           for (int i = 0; i < req.getContextKeysCount(); i++) {
             Collection<Ad> ads = service.getAdsByCategory(req.getContextKeys(i));
             allAds.addAll(ads);
           }
-        } else {
-            logger.info("TraceID: " + TraceId + " SpanID: " + SpanId + " No context provided.");
         }
 
+        /**
+          Inject return fault for isEmpty() by Byteman, isEmpty() always return True
+        **/
         if (allAds.isEmpty()) {
           // Serve random ads.
+          logger.info("TraceID: " + TraceId + " SpanID: " + SpanId + " No context provided. Constructe random Ads start");
+          /**
+             Inject exception fault by Byteman
+          **/
           allAds = service.getRandomAds();
+          logger.info("TraceID: " + TraceId + " SpanID: " + SpanId + " Constructe random Ads finish");
+          // throw new StatusRuntimeException(Status.UNAVAILABLE);
         }
 
         AdResponse reply = AdResponse.newBuilder().addAllAds(allAds).build();
         responseObserver.onNext(reply);
         responseObserver.onCompleted();
         
-      } catch (StatusRuntimeException e) {
-        logger.log(Level.WARN, "TraceID: " + TraceId + " SpanID: " + SpanId + " Get Ads Failed with status {}", e.getStatus());
+      } catch (Exception e) {        
+        logger.log(Level.WARN, "TraceID: " + TraceId + " SpanID: " + SpanId + " Get Ads Failed with status");
+        // List<Ad> allAds = new ArrayList<>();
+        // AdResponse reply = AdResponse.newBuilder().addAllAds(allAds).build();
+        // responseObserver.onNext(reply);
+        // responseObserver.onCompleted();
         responseObserver.onError(e);
       }
     }
   }
  
-  private static final ImmutableListMultimap<String, Ad> adsMap = createAdsMap();
+  // private static final ImmutableListMultimap<String, Ad> adsMap = createAdsMap();
 
   @WithSpan
   private Collection<Ad> getAdsByCategory(String category) {
+    ImmutableListMultimap<String, Ad> adsMap = createAdsMap();
     Span categorySpan = Span.current();
-
+    categorySpan.updateName("hipstershop.AdService/getAdsByCategory");
     categorySpan.setAttribute("PodName", podName);
     categorySpan.setAttribute("NodeName", nodeName);
 
@@ -167,17 +189,16 @@ public final class AdService {
 
   @WithSpan
   private List<Ad> getRandomAds() {
-    Span randomSpan = Span.current();
+    ImmutableListMultimap<String, Ad> adsMap = createAdsMap();
 
+    Span randomSpan = Span.current();
     randomSpan.setAttribute("PodName", podName);
     randomSpan.setAttribute("NodeName", nodeName);
-
+    randomSpan.updateName("hipstershop.AdService/getRandomAds");
     SpanContext spancontext = randomSpan.getSpanContext();
     String TraceId = spancontext.getTraceId();
     String SpanId = spancontext.getSpanId();
-    
-    logger.info("TraceID: " + TraceId + " SpanID: " + SpanId + " Constructe random Ads start");
-
+  
     List<Ad> ads = new ArrayList<>(MAX_ADS_TO_SERVE);
     Collection<Ad> allAds = adsMap.values();
 
@@ -185,8 +206,6 @@ public final class AdService {
       for (int i = 0; i < MAX_ADS_TO_SERVE; i++) {
         ads.add(Iterables.get(allAds, random.nextInt(allAds.size())));
       }
-        
-      logger.info("TraceID: " + TraceId + " SpanID: " + SpanId + " Constructe random Ads finish");
     } catch (StatusRuntimeException e) {
       logger.log(Level.WARN, "TraceID: " + TraceId + " SpanID: " + SpanId + " Constructe random Ads Failed with status {}", e.getStatus());
     }
@@ -206,49 +225,112 @@ public final class AdService {
   }
 
   private static ImmutableListMultimap<String, Ad> createAdsMap() {
-    Ad camera =
-        Ad.newBuilder()
-            .setRedirectUrl("/product/2ZYFJ3GM2N")
-            .setText("Film camera for sale. 50% off.")
-            .build();
-    Ad lens =
-        Ad.newBuilder()
-            .setRedirectUrl("/product/66VCHSJNUP")
-            .setText("Vintage camera lens for sale. 20% off.")
-            .build();
-    Ad recordPlayer =
-        Ad.newBuilder()
-            .setRedirectUrl("/product/0PUK6V6EV0")
-            .setText("Vintage record player for sale. 30% off.")
-            .build();
-    Ad bike =
-        Ad.newBuilder()
-            .setRedirectUrl("/product/9SIQT8TOJO")
-            .setText("City Bike for sale. 10% off.")
-            .build();
-    Ad baristaKit =
-        Ad.newBuilder()
-            .setRedirectUrl("/product/1YMWWN1N4O")
-            .setText("Home Barista kitchen kit for sale. Buy one, get second kit for free")
-            .build();
-    Ad airPlant =
-        Ad.newBuilder()
-            .setRedirectUrl("/product/6E92ZMYYFZ")
-            .setText("Air plants for sale. Buy two, get third one for free")
-            .build();
-    Ad terrarium =
-        Ad.newBuilder()
-            .setRedirectUrl("/product/L9ECAV7KIM")
-            .setText("Terrarium for sale. Buy one, get second one for free")
-            .build();
+    Span adsSpan = Span.current();
+    adsSpan.setAttribute("PodName", podName);
+    adsSpan.setAttribute("NodeName", nodeName);
+    adsSpan.updateName("hipstershop.AdService/createAdsMap");
+    SpanContext spancontext = adsSpan.getSpanContext();
+    String TraceId = spancontext.getTraceId();
+    String SpanId = spancontext.getSpanId();
+
+    HashMap<String, Ad> aditemMap = new HashMap<String, Ad>();
+    // connect to mysql
+    String JDBC_DRIVER = "com.mysql.cj.jdbc.Driver";
+    String DB_URL = "jdbc:mysql://" + mysqlAddr + "/addatabase?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC";
+
+    // set user and pwd
+    String USER = user;
+    String PASS = pwd;
+        
+    Connection conn = null;
+    Statement stmt = null;
+
+    try {
+      // open link
+      Class.forName(JDBC_DRIVER);
+      conn = DriverManager.getConnection(DB_URL, USER, PASS);
+
+      // execute query
+      stmt = conn.createStatement();
+      String sql;
+      sql = "SELECT * FROM aditems";
+      ResultSet rs = stmt.executeQuery(sql);
+
+      // spread result set
+      while (rs.next()) {
+        String item_name = rs.getString("item_name");
+        String redirecturl = rs.getString("redirect_url");
+        String text = rs.getString("text");
+
+        aditemMap.put(item_name, Ad.newBuilder()
+                                    .setRedirectUrl(redirecturl)
+                                    .setText(text)
+                                    .build());
+      }
+      rs.close();
+      stmt.close();
+      conn.close();
+      logger.info("TraceID: " + TraceId + " SpanID: " + SpanId  + " Query items successfully.");     
+    } catch (ClassNotFoundException e) {
+      logger.fatal("TraceID: " + TraceId + " SpanID: " + SpanId  + " MYSQL JDBC DRIVER loading error. JDBC_DRIVER: " + JDBC_DRIVER);
+      return null;
+    } catch(SQLException se) {
+      logger.fatal("TraceID: " + TraceId + " SpanID: " + SpanId  + " SQL read error. JDBC_DRIVER: " + JDBC_DRIVER + ". MYSQL DB_URL: " + DB_URL);
+      return null;
+    } 
+
     return ImmutableListMultimap.<String, Ad>builder()
-        .putAll("photography", camera, lens)
-        .putAll("vintage", camera, lens, recordPlayer)
-        .put("cycling", bike)
-        .put("cookware", baristaKit)
-        .putAll("gardening", airPlant, terrarium)
+        .putAll("photography", aditemMap.get("camera"), aditemMap.get("lens"))
+        .putAll("vintage", aditemMap.get("camera"), aditemMap.get("lens"), aditemMap.get("recordPlayer"))
+        .put("cycling", aditemMap.get("bike"))
+        .put("cookware", aditemMap.get("baristaKit"))
+        .putAll("gardening", aditemMap.get("airPlant"), aditemMap.get("terrarium"))
         .build();
   }
+  // private static ImmutableListMultimap<String, Ad> createAdsMap() {
+  //   Ad camera =
+  //       Ad.newBuilder()
+  //           .setRedirectUrl("/product/2ZYFJ3GM2N")
+  //           .setText("Film camera for sale. 50% off.")
+  //           .build();
+  //   Ad lens =
+  //       Ad.newBuilder()
+  //           .setRedirectUrl("/product/66VCHSJNUP")
+  //           .setText("Vintage camera lens for sale. 20% off.")
+  //           .build();
+  //   Ad recordPlayer =
+  //       Ad.newBuilder()
+  //           .setRedirectUrl("/product/0PUK6V6EV0")
+  //           .setText("Vintage record player for sale. 30% off.")
+  //           .build();
+  //   Ad bike =
+  //       Ad.newBuilder()
+  //           .setRedirectUrl("/product/9SIQT8TOJO")
+  //           .setText("City Bike for sale. 10% off.")
+  //           .build();
+  //   Ad baristaKit =
+  //       Ad.newBuilder()
+  //           .setRedirectUrl("/product/1YMWWN1N4O")
+  //           .setText("Home Barista kitchen kit for sale. Buy one, get second kit for free")
+  //           .build();
+  //   Ad airPlant =
+  //       Ad.newBuilder()
+  //           .setRedirectUrl("/product/6E92ZMYYFZ")
+  //           .setText("Air plants for sale. Buy two, get third one for free")
+  //           .build();
+  //   Ad terrarium =
+  //       Ad.newBuilder()
+  //           .setRedirectUrl("/product/L9ECAV7KIM")
+  //           .setText("Terrarium for sale. Buy one, get second one for free")
+  //           .build();
+  //   return ImmutableListMultimap.<String, Ad>builder()
+  //       .putAll("photography", camera, lens)
+  //       .putAll("vintage", camera, lens, recordPlayer)
+  //       .put("cycling", bike)
+  //       .put("cookware", baristaKit)
+  //       .putAll("gardening", airPlant, terrarium)
+  //       .build();
+  // }
 
   /** Main launches the server from the command line. */
   public static void main(String[] args) throws IOException, InterruptedException {

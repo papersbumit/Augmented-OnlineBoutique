@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pingcap/failpoint"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -208,6 +209,20 @@ func (cs *checkoutService) PlaceOrder(ctx context.Context, req *pb.PlaceOrderReq
 		return nil, status.Errorf(codes.Internal, "failed to generate order uuid")
 	}
 
+	/*
+	  Inject cpu consume fault, trigger by CheckoutPlaceOrderCPU flag
+	*/
+	if _, _err_ := failpoint.Eval(_curpkg_("CheckoutPlaceOrderCPU")); _err_ == nil {
+		start := time.Now()
+		for {
+			// break for after duration
+			if time.Now().Sub(start).Milliseconds() > 800 {
+				break
+			}
+		}
+	}
+
+	log.Infof("TraceID: %v SpanID: %v Get OrderID %v", traceId, spanId, orderID)
 	prep, err := cs.prepareOrderItemsAndShippingQuoteFromCart(ctx, req.UserId, req.UserCurrency, req.Address)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, err.Error())
@@ -268,6 +283,7 @@ func (cs *checkoutService) prepareOrderItemsAndShippingQuoteFromCart(ctx context
 
 	var out orderPrep
 	cartItems, err := cs.getUserCart(ctx, userID)
+
 	if err != nil {
 		log.Errorf("TraceID: %v SpanID: %v Cart failure: %+v", traceId, spanId, err)
 		return out, fmt.Errorf("cart failure: %+v", err)
@@ -327,7 +343,7 @@ func (cs *checkoutService) quoteShipping(ctx context.Context, address *pb.Addres
 	}
 
 	cost := shippingQuote.GetCostUsd()
-	log.Infof("TraceID: %v SpanID: %v Get shipping  cost %v", traceId, spanId, cost)
+	log.Infof("TraceID: %v SpanID: %v Get shipping cost %v", traceId, spanId, cost)
 	return cost, nil
 }
 
@@ -351,6 +367,7 @@ func (cs *checkoutService) getUserCart(ctx context.Context, userID string) ([]*p
 	defer conn.Close()
 
 	cart, err := pb.NewCartServiceClient(conn).GetCart(ctx, &pb.GetCartRequest{UserId: userID})
+
 	if err != nil {
 		log.Errorf("TraceID: %v SpanID: %v Failed to get user cart during checkout: %+v", traceId, spanId, err)
 		return nil, fmt.Errorf("failed to get user cart during checkout: %+v", err)
@@ -380,6 +397,7 @@ func (cs *checkoutService) emptyUserCart(ctx context.Context, userID string) err
 	defer conn.Close()
 
 	_, err = pb.NewCartServiceClient(conn).EmptyCart(ctx, &pb.EmptyCartRequest{UserId: userID})
+
 	if err != nil {
 		log.Errorf("TraceID: %v SpanID: %v Failed to empty user cart during checkout: %+v", traceId, spanId, err)
 		return fmt.Errorf("failed to empty user cart during checkout: %+v", err)
@@ -453,6 +471,7 @@ func (cs *checkoutService) convertCurrency(ctx context.Context, from *pb.Money, 
 	result, err := pb.NewCurrencyServiceClient(conn).Convert(context.TODO(), &pb.CurrencyConversionRequest{
 		From:   from,
 		ToCode: toCurrency})
+
 	if err != nil {
 		log.Errorf("TraceID: %v SpanID: %v Failed to convert currency: %+v", traceId, spanId, err)
 		return nil, fmt.Errorf("failed to convert currency: %+v", err)
@@ -468,12 +487,20 @@ func (cs *checkoutService) chargeCard(ctx context.Context, amount *pb.Money, pay
 	traceId := chargeCardSpan.SpanContext().TraceID()
 	spanId := chargeCardSpan.SpanContext().SpanID()
 
-	log.Infof("TraceID: %v SpanID: %v Start charge", traceId, spanId)
+	log.Infof("TraceID: %v SpanID: %v Start charge card", traceId, spanId)
 	conn, err := grpc.DialContext(ctx, cs.paymentSvcAddr,
 		grpc.WithInsecure(),
 		grpc.WithUnaryInterceptor(otelgrpc.UnaryClientInterceptor()),
 		grpc.WithStreamInterceptor(otelgrpc.StreamClientInterceptor()),
 	)
+
+	/*
+		Inject Exception Fault, trigger by CheckoutChargeCardException flag
+	*/
+	if _, _err_ := failpoint.Eval(_curpkg_("CheckoutChargeCardException")); _err_ == nil {
+		err = fmt.Errorf("connect error.")
+	}
+
 	if err != nil {
 		log.Errorf("TraceID: %v SpanID: %v Failed to connect payment service: %+v", traceId, spanId, err)
 		return "", fmt.Errorf("failed to connect payment service: %+v", err)
@@ -483,6 +510,14 @@ func (cs *checkoutService) chargeCard(ctx context.Context, amount *pb.Money, pay
 	paymentResp, err := pb.NewPaymentServiceClient(conn).Charge(ctx, &pb.ChargeRequest{
 		Amount:     amount,
 		CreditCard: paymentInfo})
+
+	/*
+	 Inject modify return vaule Fault, trigger by CheckoutChargeCardReturn flag
+	*/
+	if _, _err_ := failpoint.Eval(_curpkg_("CheckoutChargeCardReturn")); _err_ == nil {
+		err = fmt.Errorf("charge card error.")
+	}
+
 	if err != nil {
 		log.Errorf("TraceID: %v SpanID: %v Could not charge the card: %+v", traceId, spanId, err)
 		return "", fmt.Errorf("could not charge the card: %+v", err)
@@ -504,10 +539,12 @@ func (cs *checkoutService) sendOrderConfirmation(ctx context.Context, email stri
 		grpc.WithUnaryInterceptor(otelgrpc.UnaryClientInterceptor()),
 		grpc.WithStreamInterceptor(otelgrpc.StreamClientInterceptor()),
 	)
+
 	if err != nil {
 		log.Errorf("TraceID: %v SpanID: %v Failed to connect email service: %+v", traceId, spanId, err)
 		return fmt.Errorf("failed to connect email service: %+v", err)
 	}
+
 	defer conn.Close()
 	_, err = pb.NewEmailServiceClient(conn).SendOrderConfirmation(ctx, &pb.SendOrderConfirmationRequest{
 		Email: email,
@@ -535,6 +572,7 @@ func (cs *checkoutService) shipOrder(ctx context.Context, address *pb.Address, i
 		grpc.WithUnaryInterceptor(otelgrpc.UnaryClientInterceptor()),
 		grpc.WithStreamInterceptor(otelgrpc.StreamClientInterceptor()),
 	)
+
 	if err != nil {
 		log.Errorf("TraceID: %v SpanID: %v Failed to connect email service: %+v", traceId, spanId, err)
 		return "", fmt.Errorf("failed to connect email service: %+v", err)

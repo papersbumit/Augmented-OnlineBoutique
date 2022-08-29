@@ -21,10 +21,10 @@ require (
 	go.opentelemetry.io/otel/trace v1.0.0
 	google.golang.org/grpc v1.40.0
 	github.com/golang/protobuf v1.5.2
-    google.golang.org/genproto v0.0.0-20210909211513-a8c4777a87af 
-    github.com/googleapis/gax-go v1.0.3
+	google.golang.org/genproto v0.0.0-20210909211513-a8c4777a87af
+	github.com/googleapis/gax-go v1.0.3
 	google.golang.org/api v0.56.0
-
+	github.com/pingcap/failpoint v0.0.0-20220309090818-0d9efe9d1572
 )
 
 replace git.apache.org/thrift.git v0.12.1-0.20190708170704-286eee16b147 => github.com/apache/thrift v0.12.1-0.20190708170704-286eee16b147

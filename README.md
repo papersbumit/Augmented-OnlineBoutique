@@ -3,7 +3,7 @@
 [Online Boutique](https://github.com/GoogleCloudPlatform/microservices-demo) is open sourced by google cloud.
 But the initial microservice application open-sourced by Google Cloud is not equipped with adequate observability instrumentation (e.g., Trace, Log does not contain TraceID). In this study, we instrument the Opentelemetry API for each service to obtain traces and insert Trace ID and Span ID into each log to enhance observability.
 
-This Augmented-Online Boutique is open-sourced by paper Nezha: Fine-grained Root Causes Diagnosis inMicroservices with Multi-modal Observability Data
+This Augmented-Online Boutique is open-sourced by paper Nezha: Fine-grained Root Causes Diagnosis inMicroservices with Multi-modal Observability Data that submited to ICSE 2023
 
 ## Screenshots
 
